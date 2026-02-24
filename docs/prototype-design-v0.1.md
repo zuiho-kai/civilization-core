@@ -39,7 +39,7 @@
 
 | 约束 | 规格 |
 |------|------|
-| 总代码规模 | ≤ 800 行 |
+| 总代码规模 | ≤ 1200 行（含注释和空行；原 800 行在完整机制评估后上调） |
 | 依赖 | 仅 Python 标准库 |
 | LLM | 不接入 |
 | 外部框架 | 不引入 |
@@ -124,7 +124,9 @@ civ_kernel/
 |------|------|------|
 | `id` | `int` | 唯一标识 |
 | `wealth` | `float` | 当前财富值 |
-| `energy` | `float` | 可用行动能量（生产时锁定） |
+| `energy` | `float` | 当前行动能量（生产时锁定，随时间自然回复） |
+| `max_energy` | `float` | 能量上限，个体恒定 |
+| `regen_rate` | `float` | 能量回复速率（每虚拟时间单位） |
 | `neighbors` | `dict[int, float]` | 局部信任网络（agent_id → trust_value） |
 | `status` | `float` | 阶层指数（财富 + 网络中心度计算） |
 | `producing` | `bool` | 是否正在生产（锁定状态） |
@@ -144,11 +146,13 @@ civ_kernel/
 |------|------|------|
 | `id` | `int` | 唯一标识 |
 | `members` | `set[int]` | 成员 agent_id 集合 |
-| `rules` | `dict` | 当前制度参数集（税率、分配比例等） |
+| `rules` | `dict[str, float]` | 制度参数集（详见 5.5.1 枚举） |
+| `treasury` | `float` | 公共池（税收积累） |
 | `efficiency` | `float` | 内部协作效率（触发突变的指标之一） |
 | `conflict_cost` | `float` | 累计冲突代价 |
+| `legitimacy` | `float` | 组织合法性（v0.2 接入 LegitimacyMult） |
 
-注：Organization 是参数容器，不是预设制度模板。规则通过 `rule_mutation_event` 演化。
+注：Organization 不是预设制度模板。rules 是连续数值空间中的一个点，通过 `rule_mutation_event` 随机游走演化。
 
 ### 4.3 Event
 
@@ -421,6 +425,68 @@ on produce_complete:
 - Agent 自身 energy 水平
 - 所属组织的协作加成（org 内协作可缩短 duration）
 
+**energy 回复机制：** 每次 `wake_up` 或 `produce_complete` 时，根据距上次事件的时间差回复 energy：
+
+```python
+elapsed = now - agent.last_event_time
+agent.energy = min(agent.max_energy, agent.energy + agent.regen_rate * elapsed)
+```
+
+energy 不可转移所有权、不可永久剥夺。Coerce 不抢 energy，只控制 wealth 产出方向（制度层控制）。
+
+### 5.3.1 ResourceLedger 与资源模型
+
+**核心原则：守恒的是因果，不是总量。**
+
+系统区分两类资源：
+
+| 资源 | 类型 | 是否守恒 | 语义 |
+|------|------|----------|------|
+| `energy` | Flow（流量） | 不守恒 — 个体可再生，有上限 | 行动能力 / 劳动力 / 时间 |
+| `wealth` | Stock（存量） | 不守恒 — 可通过生产增长 | 可积累价值 / 产出 |
+
+**"因果守恒"定义：** 所有 wealth/energy 变更必须来自合法事件，禁止非事件写入。
+
+合法事件类型：
+
+| 事件 | wealth 变化 | energy 变化 |
+|------|-------------|-------------|
+| `produce_complete` | +（energy → wealth 转化） | 释放锁定量，自然回复 |
+| `exchange_settle` | A↔B 双向转移，总和为零 | 每次 exchange 消耗少量 energy |
+| `coerce_transfer` | B→A 单向转移，总和为零 | A 消耗自身 energy（强制是累活） |
+| `energy_regen` | 无 | +（自然回复，≤ max_energy） |
+
+**禁止：** 任意修改余额、非事件写入、跨 Agent energy 转移。
+
+**wealth 通胀约束（v0.1）：** 不引入折旧机制，靠以下自然约束限制增长率：
+- 生产需要消耗 energy → energy 有上限且回复有速率
+- 生产需要时间（duration）→ Agent 不能同时生产两份
+- 生产函数：`wealth_output = energy_spent × PRODUCTION_EFFICIENCY × coordination_factor`
+
+**ResourceLedger 职责：**
+
+```python
+class ResourceLedger:
+    def transfer_wealth(self, from_id, to_id, amount):
+        # 断言：amount > 0，from 余额充足
+        # 扣减 → 增加，原子操作
+
+    def produce(self, agent_id, energy_cost):
+        # wealth_gain = energy_cost * PRODUCTION_EFFICIENCY
+        # agent.energy -= energy_cost（已在 start_production 时锁定）
+        # agent.wealth += wealth_gain
+
+    def audit_event(self, event, before_snapshot, after_snapshot):
+        # 校验该 event 前后的 wealth/energy 变化是否合法
+        # 不合法则 raise（开发期断言，非运行时容错）
+```
+
+**设计理由：**
+- energy 个体可再生 → 系统不会冻结（开放能量系统，参考 Prigogine 耗散结构理论）
+- energy 不可转移 → 物理层防止"剥夺行动能力"导致吸收态
+- wealth 可增长 → 生产有意义，经济增长存在
+- 制度层（Coerce + org.rules）控制产出分配 → 奴役/税收/掠夺通过 wealth 流向实现，不需要物理层支持
+
 ### 5.4 局部网络结构
 
 每个 Agent 只维护局部 trust 网络，信息不全局传播：
@@ -456,6 +522,126 @@ OrgEngine（周期性局部扫描，非全局）:
 
 组织解散条件：成员数低于 `MIN_ORG_SIZE`（默认 3）。
 
+### 5.5.1 Organization.rules 枚举
+
+rules 是 `dict[str, float]`，分为 6 类。每个 key 都直接影响 Agent 收益函数（不影响收益的 rule 不该存在）。
+
+**① 经济规则（v0.1 实现）**
+
+| key | 范围 | 默认 | 含义 | 对 Agent 的影响 |
+|-----|------|------|------|----------------|
+| `tax_rate` | [0, 0.5] | 0.05 | 成员 Exchange 收益抽成比例 | `net_income = production × (1 - tax_rate) + redistribution_share` |
+| `redistribution_ratio` | [0, 1] | 0.5 | 税收再分配方式：0=全给领导，1=均分全员 | 影响组织内贫富差距和成员留存意愿 |
+| `public_goods_efficiency` | [0, 1] | 0.3 | 税收转化为生产力加成的效率 | `productivity_bonus = public_goods_efficiency × log(org_size)` |
+
+**② 强制规则（v0.1 实现）**
+
+| key | 范围 | 默认 | 含义 | 对 Agent 的影响 |
+|-----|------|------|------|----------------|
+| `internal_coercion_tolerance` | [0, 1] | 0.2 | 对内部 Coerce 的容忍度 | 低容忍 → 内部 Coerce 额外 trust 惩罚 ×2；高容忍 → 军事化组织 |
+| `punishment_severity` | [0, 1] | 0.3 | 违规/叛逃惩罚力度 | `C_coercion = internal_conflict_prob × punishment_severity × wealth` |
+| `enforcement_cost_share` | [0, 1] | 0.5 | 组织补贴个体强制成本的比例 | 0=个人全扛，1=org 公共池出钱 |
+
+**③ 权力分配规则（v0.1 简化实现，v0.2 完整）**
+
+| key | 范围 | 默认 | 含义 | 对 Agent 的影响 |
+|-----|------|------|------|----------------|
+| `delegation_rate` | [0, 1] | 0.5 | 成员 power 多少可被组织调用 | 高 → 中央 effective power 强；低 → 分封/虚君 |
+
+v0.2 扩展：`decision_mode`（autocracy/council/vote）、`decision_cost_factor`。
+
+**④ 意识形态规则（v0.2 实现，v0.1 默认中性）**
+
+| key | 范围 | 默认 | 含义 | 对 Agent 的影响 |
+|-----|------|------|------|----------------|
+| `ideology_strength` | [0, 1] | 0.0 | 意识形态凝聚力 | 提升 legitimacy，但 extremity 高时压低 productivity |
+| `ideology_extremity` | [0, 1] | 0.0 | 意识形态极端程度 | `productivity_penalty = ideology_extremity × base_penalty` |
+
+**⑤ 成员流动规则（v0.1 实现）**
+
+| key | 范围 | 默认 | 含义 | 对 Agent 的影响 |
+|-----|------|------|------|----------------|
+| `entry_barrier` | [0, 1] | 0.3 | 加入所需最低 avg trust（对现有成员） | 高 → 排外封闭圈子；低 → 开放商贸联盟 |
+| `exit_penalty` | [0, 1] | 0.1 | 退出时的 wealth 罚没比例 | 高 → 极权锁定；低 → 自由流动 |
+
+**⑥ 对外姿态规则（v0.1 实现）**
+
+| key | 范围 | 默认 | 含义 | 对 Agent 的影响 |
+|-----|------|------|------|----------------|
+| `external_aggression_bias` | [0, 1] | 0.3 | 对外 Coerce 的倾向性 | 影响成员 wake_up 时 Coerce 决策权重 |
+| `loot_policy` | [0, 1] | 0.3 | 组织层面的掠夺比例上限 | 覆盖个体 LOOT_RATIO，`effective_loot = min(LOOT_RATIO, loot_policy)` |
+
+**制度类型 × rules 参数对照：**
+
+| 制度 | tax | redist | public_goods | delegation | exit_pen | aggression | loot_pol |
+|------|-----|--------|--------------|------------|----------|------------|----------|
+| 游牧联盟 | 低 | 高 | 低 | 高 | 低 | 高 | 高 |
+| 农业帝国 | 中高 | 中 | 高 | 高 | 中 | 中 | 低 |
+| 商贸共和 | 中 | 中 | 高 | 低 | 低 | 低 | 低 |
+| 极权国家 | 高 | 低 | 中 | 高 | 高 | 高 | 中 |
+| 封建分权 | 低 | 低 | 低 | 低 | 中 | 中 | 中 |
+
+### 5.5.2 Agent 加入/退出组织决策
+
+Agent 加入组织是收益驱动的，不是指令驱动的：
+
+```
+EV_join(A, O) =
+    E_economic + E_security + E_power
+  - C_tax - C_coercion - C_exit_lock
+
+EV_outside(A) =
+    production - external_coerce_risk × wealth
+
+Agent 加入条件：EV_join - EV_outside > JOIN_THRESHOLD
+Agent 退出条件：EV_outside - EV_join > EXIT_THRESHOLD（需另付 exit_penalty）
+```
+
+**各项定义：**
+
+```python
+# 经济收益：税后收入 + 再分配 + 公共品
+E_economic = (1 - tax_rate) * production
+           + treasury * redistribution_ratio / org_size
+           + public_goods_efficiency * log(org_size) * production
+
+# 安全收益：组织提供保护，降低被外部 Coerce 的风险
+E_security = (coerce_risk_outside - coerce_risk_inside) * wealth
+# coerce_risk_inside = coerce_risk_outside × (1 - org_protection_power)
+
+# 权力收益（v0.1 简化）
+E_power = delegation_rate * treasury / org_size
+
+# 税收成本
+C_tax = tax_rate * production
+
+# 内部强制风险
+C_coercion = internal_conflict_prob * punishment_severity * wealth
+
+# 退出锁定成本（影响加入意愿——加入前就知道退出要罚钱）
+C_exit_lock = exit_penalty * wealth * EXIT_PROBABILITY_ESTIMATE
+```
+
+**EV_coerce 嵌入决策空间（掠夺 vs 生产的自动切换）：**
+
+```python
+# Agent 每次 wake_up 的行为选择变为收益比较：
+EV_produce = energy_spent * PRODUCTION_EFFICIENCY * (1 - tax_rate_if_in_org)
+EV_coerce  = p_success * loot_amount - energy_cost - wealth_cost - trust_penalty
+EV_exchange = expected_trade_surplus * (1 - tax_rate_if_in_org)
+
+# loot_amount 三重上限：
+loot_amount = min(
+    loot_ratio * B.wealth,          # 对方承受上限
+    carry_capacity(A),               # 搬运能力（v0.2: ∝ energy × mobility）
+    destruction_limit                 # 防止完全清零（v0.2）
+)
+
+# 当 EV_coerce > EV_produce 时，社会自然转入掠夺倾向
+# 当 EV_produce > EV_coerce 时，社会自然转入生产主导
+# 不需要手动切换"模式"
+```
+
 ### 5.6 制度压力触发突变
 
 制度变化不走投票流程，而是由结构压力驱动：
@@ -465,27 +651,243 @@ if org.efficiency_drop > EFFICIENCY_THRESHOLD
    or migration_rate > MIGRATION_THRESHOLD
    or org.conflict_cost > CONFLICT_THRESHOLD:
        schedule Event(type='rule_mutation', target=org.id)
+```
+
+**突变机制（具体化）：**
+
+```python
+# 可突变的 key（不是所有 rule 都突变）
+MUTATABLE_KEYS = [
+    'tax_rate', 'redistribution_ratio', 'delegation_rate',
+    'external_aggression_bias', 'loot_policy',
+    'entry_barrier', 'exit_penalty'
+]
+# ideology_strength 和 public_goods_efficiency 不参与随机突变
+# （前者需要意识形态事件驱动，后者需要技术事件驱动）
+
+MUTATION_STEP = 0.05  # 每次扰动幅度
 
 on rule_mutation:
-    org.rules = mutate(org.rules)   # 随机扰动参数集
+    for key in MUTATABLE_KEYS:
+        org.rules[key] += normal(0, MUTATION_STEP)
+        org.rules[key] = clamp(org.rules[key], MIN[key], MAX[key])
 ```
 
-`rules` 是参数集（如税率 0.1 → 0.15），不是预设制度模板。
+**突变阈值默认值：**
+
+| 参数 | 默认值 | 含义 |
+|------|--------|------|
+| `EFFICIENCY_THRESHOLD` | 0.3 | efficiency 下降超过 30% 触发 |
+| `MIGRATION_THRESHOLD` | 0.2 | 单周期内 20% 成员退出触发 |
+| `CONFLICT_THRESHOLD` | 成员 avg_wealth × 0.5 | 累计冲突代价过高触发 |
+
 突变后 efficiency 和 conflict_cost 重新积累，允许多次迭代演化。
 
-### 5.7 强制成本递增
+### 5.7 Coerce 行为机制
 
-强制行为的代价随施压方组织规模扩大而非线性增长，防止单一帝国收敛：
+#### 5.7.1 EffectivePower 框架
+
+Power 采用模块化乘法结构，v0.1 实现前两个模块，其余预留接口默认 1.0：
 
 ```
+EffectivePower = BaseCapacity × OrgMultiplier × LegitimacyMult × IdeologyMod × ContextMod
+```
+
+**① BaseCapacity（个体基础能力）— v0.1 实现**
+
+```python
+BaseCapacity = a1 * energy + a2 * wealth
+# v0.2+ 扩展位：+ a3 * physique + a4 * tech_level
+```
+
+**② OrganizationMultiplier（规模放大 + 治理成本）— v0.1 实现**
+
+```python
+OrgMultiplier = (1 + b1 * log(org_size + 1)) / (1 + b2 * org_size)
+# org_size = 1 for 无组织 Agent → multiplier ≈ 1.0
+```
+
+结构特性（"规模双刃剑"）：
+- log 提供规模收益（递减）
+- 分母提供治理成本（递增）
+- 中型组织 power 峰值最大，超大组织开始衰退
+- 支持：国家崛起 → 鼎盛 → 崩溃的完整周期
+
+**③ LegitimacyMultiplier — v0.2 实现，v0.1 默认 1.0**
+
+```python
+LegitimacyMult = 1 + c1 * legitimacy   # legitimacy 来源：trust 网络、loyalty、程序合法性
+```
+
+支持场景：苏联式信任崩溃（legitimacy 骤降 → effective power 下降，即使 org_size 不变）、周天子式名存实亡（legitimacy > 0 但 enforcement ≈ 0）、共和国（legitimacy 来自程序一致性）。
+
+**④ IdeologyModifier — v0.3 实现，v0.1 默认 1.0**
+
+```python
+IdeologyMod = 1 + f1 * ideology_cohesion - f2 * ideology_extremity
+```
+
+温和意识形态 → 稳定加成；极端意识形态 → 短期增强但长期衰退（生产效率下降）。
+支持场景：纳粹式高速动员→扩张→崩溃、红色高棉式意识形态压制经济理性。
+
+**⑤ ContextModifier — v0.3 实现，v0.1 默认 1.0**
+
+```python
+ContextMod = 1 + d1 * terrain_bonus - d2 * instability
+```
+
+**v0.1 默认参数（待校准）：**
+
+| 参数 | 默认值 | 含义 |
+|------|--------|------|
+| `a1` | 1.0 | energy 对 power 的权重 |
+| `a2` | 0.5 | wealth 对 power 的权重 |
+| `b1` | 1.0 | 组织规模放大系数 |
+| `b2` | 0.05 | 治理成本系数（决定最优组织规模拐点） |
+
+**扩展路线（BaseCapacity 未来可插入）：**
+
+| 扩展变量 | 语义 | 版本 |
+|----------|------|------|
+| `physique` | 体质（战斗/生产/精神型） | v0.2+ |
+| `tech_level` | 技术水平 | v0.2+ |
+| `sovereignty` | 子组织主权度 | v0.3+（支持唐朝式藩镇割据） |
+| `delegation_rate` | 授权率 | v0.3+（支持选帝侯式结构） |
+
+**支持的制度涌现类型（完整框架下）：**
+
+| 制度类型 | 关键驱动变量 | 历史参照 |
+|----------|-------------|----------|
+| 帝国集中型 | 高 OrgMultiplier | 唐帝国 |
+| 联邦崩溃型 | LegitimacyMult 骤降 | 苏联 |
+| 分封象征型 | 高 legitimacy + 低 enforcement | 周天子 |
+| 选举皇帝型 | delegation 结构 | 神圣罗马帝国 |
+| 商业寡头共和 | 高 a2（wealth 权重） | 威尼斯共和国 |
+| 军阀碎片化 | 高 a1 + 中 OrgMult | 战国 / 战国时代（日本） |
+| 极权动员型 | 高 IdeologyMod | 纳粹德国 |
+| 革命清洗型 | 极端 ideology_extremity | 红色高棉 |
+| 掠夺流动型 | 高 mobility + 低 local_dependency | 维京时代 / 蒙古帝国 |
+| 农民起义席卷型 | legitimacy 崩溃 + 高 inequality + 高 destruction | 闯王（李自成） |
+| 可控常态战争 | 中 loot + 高 local_dependency + 制度化 | 百年战争 / 中世纪欧洲 |
+| 游牧掠夺—定居转型 | 高 mobility → 逐渐提高 local_dependency | 蒙古→元朝 |
+| 技术官僚型 | 高 tech_level + 高 coerce 成本 | 新加坡 |
+| 无国家商贸网络 | 高 trust + 低 coerce 收益 | 汉萨同盟 |
+
+#### 5.7.2 Coerce 完整流程
+
+```
+Agent A wake_up → 决策 COERCE（目标 B）
+  ↓
+① 前置检查
+   - A.wealth > coerce_wealth_cost（付不起就放弃）
+   - A.energy > coerce_energy_cost
+   - B 在 A 的 neighbors 中（只能强制认识的人）
+
+② 代价计算（双重消耗）
+   energy_cost = BASE_COERCE_ENERGY                    # 行动成本（体力）
+   wealth_cost = BASE_COERCE_WEALTH × (1 + org_cost)   # 工具/组织成本
+   org_cost = (org_size ^ 1.5) / COERCE_SCALE_FACTOR   # 组织越大维护越贵
+   代价由发起 Agent 本人承担（org 可通过 rules 补贴，但必须记账到个体）
+
+③ 成功概率（对称比例函数）
+   power_A = EffectivePower(A)
+   power_B = EffectivePower(B)
+   p_success = power_A / (power_A + power_B)
+
+④ 结算
+   if 成功:
+       loot = min(B.wealth × LOOT_RATIO, energy_spent × LOOT_EFFICIENCY)
+       B.wealth -= loot
+       A.wealth += loot - wealth_cost
+       trust(B→A) → 接近 0
+       B 的邻居：trust(→A) 小幅下降（局部声誉惩罚）
+   if 失败:
+       A.wealth -= wealth_cost（白付）
+       A.energy -= energy_cost（白付）
+       额外失败惩罚 [待定：见下方待决策项]
+       trust(B→A) 大幅下降
+
+⑤ 后续影响
+   成功：A 短期获利，但局部 trust 受损 → 未来 Exchange 机会减少
+   失败：A 纯亏损 → 抑制盲目强制
+```
+
+#### 5.7.3 强制成本递增（组织规模）
+
+```python
 监督成本 = base_cost × (org_size ^ 1.5)
 内部冲突概率 = 1 - e^(-α × org_size)
 ```
 
-结果：
-- 强制 + 扩张到一定规模后，维护成本超过收益
-- 大型组织面临内部叛离风险，触发分裂或制度突变
-- 系统自然维持多组织并存的动态平衡
+| 组织规模 | 监督成本倍数 | 内部冲突概率（α=0.05） |
+|----------|-------------|----------------------|
+| 5 人 | ×11 | 22% |
+| 10 人 | ×32 | 39% |
+| 20 人 | ×89 | 63% |
+| 50 人 | ×354 | 92% |
+
+#### 5.7.4 LOOT_RATIO 与掠夺可持续性
+
+**核心设计理由：** LOOT_RATIO 不应是固定小数，而是 ∈ [0, 1] 的宽范围。关键不在于"拿多少"，而在于"掠夺是否可持续"——同样 70% 的掠夺，农业社会会自毁，游牧社会可存活。
+
+**v0.1 实现：** LOOT_RATIO 为全局默认参数，默认 0.3。v0.2 引入掠夺可持续性框架后可上调范围。
+
+**v0.2+ 掠夺可持续性框架（完整设计，v0.1 不实现）：**
+
+掠夺的长期后果取决于三个因子：
+
+```python
+# ① destruction_factor — 掠夺造成的生产力破坏
+destruction = loot_ratio ** 2 × violence_intensity
+# 掠夺越狠破坏越大，但关系是平方（少量掠夺破坏极小，大量掠夺破坏骤增）
+
+# ② mobility — 掠夺方的机动能力
+# 高 mobility → 掠夺后可撤离，不承担破坏后果
+# 低 mobility → 掠夺自己的邻居 = 破坏自己的生产环境
+
+# ③ local_dependency — 被掠夺方对本地生产的依赖度
+# 农业社会 local_dependency 高 → 被掠夺后恢复慢
+# 商贸社会 local_dependency 中 → 有替代供应链
+# 游牧社会 local_dependency 低 → 掠夺对其影响小
+
+future_productivity_loss = destruction × local_dependency × (1 - mobility)
+```
+
+**三种掠夺模式对照：**
+
+| 类型 | 历史参照 | loot_ratio | mobility | local_dep | destruction | 可持续？ |
+|------|----------|------------|----------|-----------|-------------|----------|
+| 农民起义席卷 | 闯王（李自成） | 高（0.7+） | 低 | 高 | 极高 | 不可持续 — 摧毁生产基础后自身也崩溃 |
+| 游牧/海盗掠夺 | 维京 / 蒙古 | 高（0.6+） | 高 | 低 | 中 | 可持续 — 掠夺后撤离，不依赖本地 |
+| 中世纪常态战争 | 百年战争 | 低中（0.2） | 中 | 中高 | 低 | 可持续 — 战后生产恢复，制度化战争 |
+| 掠夺→定居转型 | 蒙古→元朝 | 高→低 | 高→低 | 低→高 | 高→低 | 转型期 — mobility 下降后必须转生产 |
+
+**为什么这能自然涌现：** Agent 不需要被标记为"游牧"或"农业"。只要 mobility 和 local_dependency 作为 Agent 属性存在，不同组合的 Agent 群体会自然形成不同的经济模式。高 mobility + 低 local_dependency 的 Agent 聚集 → 游牧掠夺联盟自然涌现。
+
+**覆盖性验证 — 清朝模式（Qing dynasty 全生命周期）：**
+
+清朝不是单一制度，而是一条完整的生命周期轨迹。验证当前框架能否覆盖其每个阶段：
+
+| 阶段 | 历史特征 | 框架中的对应机制 | 是否已覆盖 |
+|------|----------|-----------------|-----------|
+| 入关前（后金） | 草原军事集团，高机动掠夺 | 高 mobility + 低 local_dependency → 游牧掠夺模式 | ✅ 已有 |
+| 入关整合 | 军事集团接管农业财政，八旗+绿营并存 | mobility/local_dependency 属性漂移（高→低），不需要模式切换机制 | ✅ 属性漂移 |
+| 康乾盛世 | 规模扩张、生产力强、合法性高 | OrgMultiplier 接近峰值 + LegitimacyMult 高 | ✅ 已有 |
+| 晚期衰退 | 人口压力、财政刚性、治理成本过高 | `(1+log(org_size)) / (1+b2*org_size)` 分母主导 → 规模成本超过收益 | ✅ 已有 |
+| 外部冲击（鸦片战争） | 技术差距导致军事失衡 | tech_level 在 BaseCapacity 扩展位，v0.2+ 接入 | ⏳ v0.2 |
+| 内部起义（太平天国） | legitimacy 崩溃 + inequality 高 | 农民起义席卷模式（高 destruction + 低 mobility） | ✅ 已有 |
+
+关键结论：清朝模式的核心动力学（游牧→帝国→衰退→崩溃）不需要新增机制，靠已有变量的连续漂移即可覆盖。唯一缺口是"外部文明技术差距"（tech_level），已规划在 v0.2 的 BaseCapacity 扩展位中。
+
+#### 5.7.5 待决策项
+
+以下参数在设计讨论中尚未拍板，编码前必须确认：
+
+| 参数 | 含义 | 候选值 | 状态 |
+|------|------|--------|------|
+| `失败额外惩罚` | 强制失败时除白付成本外的额外损失 | 无 / 固定50%投入 / f(power_B/power_A) | **待定** |
+
+**验证指标（运行时校准）：** 长期强制行为占比应 < 60%，若高于此值说明强制收益过高，需降低 LOOT_RATIO 或提高失败惩罚。
 
 ---
 
@@ -507,7 +909,7 @@ AgentRegistry     → dict[id, Agent]
 EventQueue        → heapq（min-heap by trigger_time）
 NetworkGraph      → 稀疏邻接表
 OrganizationIndex → dict[id, Organization]
-ResourceLedger    → 全局守恒账本
+ResourceLedger    → 因果守恒账本（事件来源合法性审计）
 ```
 
 ---
@@ -546,8 +948,9 @@ ResourceLedger    → 全局守恒账本
 
 | 阶段 | 目标 | 关键新增 |
 |------|------|----------|
-| v0.1（当前） | 最小可运行内核，验证核心机制 | 事件引擎 + 三类原语 + 局部网络 |
-| v0.2 | 组织涌现 + 制度突变 | OrgEngine + rule_mutation |
+| v0.1（当前） | 最小可运行内核，验证核心机制 | 事件引擎 + 三类原语 + 局部网络 + Power(Base+Org) |
+| v0.2 | 组织涌现 + 制度突变 + 信任驱动 | OrgEngine + rule_mutation + LegitimacyMult + physique/tech_level |
+| v0.3 | 制度多样性 | IdeologyMod + ContextMod + sovereignty/delegation（支持分封/联邦/极权） |
 | 第二阶段 | 500+ Agent 持续稳定运行 | 性能优化、局部化调度 |
 | 第三阶段 | 外部 Agent 接入 | 开放 API 接口、虚拟劳动力市场 |
 | 最终目标 | 持续运行的制度实验场 | 无终局、无预设价值导向 |
