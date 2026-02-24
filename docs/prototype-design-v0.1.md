@@ -804,7 +804,7 @@ Agent A wake_up → 决策 COERCE（目标 B）
    if 失败:
        A.wealth -= wealth_cost（白付）
        A.energy -= energy_cost（白付）
-       额外失败惩罚 [待定：见下方待决策项]
+       额外失败惩罚：Penalty_fail（见 5.7.5）
        trust(B→A) 大幅下降
 
 ⑤ 后续影响
@@ -879,15 +879,79 @@ future_productivity_loss = destruction × local_dependency × (1 - mobility)
 
 关键结论：清朝模式的核心动力学（游牧→帝国→衰退→崩溃）不需要新增机制，靠已有变量的连续漂移即可覆盖。唯一缺口是"外部文明技术差距"（tech_level），已规划在 v0.2 的 BaseCapacity 扩展位中。
 
-#### 5.7.5 待决策项
+#### 5.7.5 Coerce 失败惩罚
 
-以下参数在设计讨论中尚未拍板，编码前必须确认：
+失败惩罚分四层，v0.1 实现前两层，后两层预留：
 
-| 参数 | 含义 | 候选值 | 状态 |
-|------|------|--------|------|
-| `失败额外惩罚` | 强制失败时除白付成本外的额外损失 | 无 / 固定50%投入 / f(power_B/power_A) | **待定** |
+```
+Penalty_fail = R_retaliation + S_institution + L_legitimacy + M_moral
+```
 
-**验证指标（运行时校准）：** 长期强制行为占比应 < 60%，若高于此值说明强制收益过高，需降低 LOOT_RATIO 或提高失败惩罚。
+**① 对手反击（Retaliation）— v0.1 实现**
+
+对手越强，反击越狠。打弱者失败只是运气差（低惩罚），打强者失败代价高（自不量力）。
+
+```python
+R_retaliation = (power_B / (power_A + power_B)) × COUNTER_SEVERITY × wealth_A
+# COUNTER_SEVERITY 默认 0.3
+```
+
+| power_B / power_A | 反击强度（占 wealth_A 比例） | 场景 |
+|--------------------|---------------------------|------|
+| 0.2（碾压弱者） | ~5% | 运气差，小损失 |
+| 1.0（势均力敌） | ~15% | 对等反击 |
+| 3.0（以卵击石） | ~23% | 严重反击 |
+
+**② 制度制裁（Institution）— v0.1 部分实现**
+
+如果 A 所属 org 有 `internal_coercion_tolerance` 规则，且目标 B 也在同一 org 内：
+
+```python
+S_institution = enforcement_prob × punishment_severity × wealth_A
+# enforcement_prob = org.legitimacy × (1 - internal_coercion_tolerance)
+# v0.1 简化：enforcement_prob = 1 - internal_coercion_tolerance（org.legitimacy 默认 1.0）
+```
+
+跨 org 或无 org 的 Coerce → S_institution = 0（无制度可制裁）。
+
+**③ 合法性损失（Legitimacy）— v0.2 实现**
+
+```python
+L_legitimacy = legitimacy_loss_rate × power_A
+# 失败削弱威望，影响后续 Coerce 成功率和组织内地位
+```
+
+**④ 道德规范（Moral Norm）— v0.2 实现**
+
+```python
+M_moral = norm_strength × (1 - aggression_norm) × social_trust
+# 掠夺文化中 aggression_norm 高 → M_moral ≈ 0
+# 商贸文化中 aggression_norm 低 → M_moral 高
+```
+
+**完整 EV_coerce（含失败惩罚）：**
+
+```python
+EV_coerce = p_success × loot_amount
+          - (1 - p_success) × Penalty_fail
+          - energy_cost
+          - wealth_cost
+
+# 系统自然决定是否进入掠夺阶段：
+# EV_coerce > EV_produce → 掠夺倾向
+# EV_coerce < EV_produce → 生产主导
+```
+
+**不同社会形态下的惩罚结构对比：**
+
+| 社会类型 | 反击 | 制度惩罚 | 合法性损失 | 道德惩罚 | 总失败风险 |
+|----------|------|----------|-----------|----------|-----------|
+| 无政府/游牧 | 高（纯 power） | 无 | 低 | 低 | 中 |
+| 封建王国 | 中 | 中 | 中 | 中 | 中高 |
+| 高度官僚帝国 | 中 | 高 | 高 | 高 | 高 |
+| 掠夺文化联盟 | 高 | 低 | 低 | 无 | 中低 |
+
+**验证指标（运行时校准）：** 长期强制行为占比应 < 60%，若高于此值说明强制收益过高，需降低 LOOT_RATIO、提高 COUNTER_SEVERITY 或提高失败惩罚。
 
 ---
 
