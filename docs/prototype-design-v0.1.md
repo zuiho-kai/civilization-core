@@ -879,6 +879,31 @@ future_productivity_loss = destruction × local_dependency × (1 - mobility)
 
 关键结论：清朝模式的核心动力学（游牧→帝国→衰退→崩溃）不需要新增机制，靠已有变量的连续漂移即可覆盖。唯一缺口是"外部文明技术差距"（tech_level），已规划在 v0.2 的 BaseCapacity 扩展位中。
 
+**覆盖性验证 — 二战模式（多方工业化战争）：**
+
+二战不是单一变量驱动，而是多个 EV 因子同时推高 EV_war > EV_peace。以日本为例：
+
+```
+EV_war = P_success × resource_gain
+       - expected_war_cost
+       - retaliation_cost
+       - alliance_escalation
+       + legitimacy_boost
+       - economic_sanction_loss
+```
+
+| 驱动因子 | 历史对应 | 框架中的对应机制 | 是否已覆盖 |
+|----------|----------|-----------------|-----------|
+| 资源稀缺 | 日本依赖外部石油 | scarcity_pressure → 推高 loot_ratio 和 aggression_bias | ⏳ v0.2（掠夺可持续性框架） |
+| 经济制裁 | 美国石油禁运 | sanction/embargo：和平状态经济损失推高 EV_war | ❌ 需新增 |
+| 工业产能差 | 美国生产力远超日本 | tech_level 在 BaseCapacity 扩展位 | ⏳ v0.2 |
+| 误判对手实力 | 日本高估短期胜算 | perception_bias：perceived_power ≠ real_power | ❌ 需新增 |
+| 联盟连锁 | 一对一冲突升级为多方战争 | alliance_chain：org 间防御/进攻协约 | ❌ 需新增 |
+| 沉没成本 | 越打越深不愿止损 | sunk_cost_bias：累计投入推高继续战争倾向 | ❌ 需新增 |
+| 长期消耗战 | 中国人口规模 vs 日本军事优势 | War_Capacity(t) = Production × duration | ✅ 已有（production + 时间模型） |
+
+关键结论：二战模式需要 4 个当前框架中不存在的变量（perception_bias / alliance_chain / sanction / sunk_cost_bias），规划在 v0.3+ 实现。其中 **perception_bias（信息不完美）** 是最关键的——没有它就无法解释为什么理性 Agent 会发起注定失败的战争。
+
 #### 5.7.5 Coerce 失败惩罚
 
 失败惩罚分四层，v0.1 实现前两层，后两层预留：
@@ -1010,14 +1035,15 @@ ResourceLedger    → 因果守恒账本（事件来源合法性审计）
 
 ## 9. 演进路线
 
-| 阶段 | 目标 | 关键新增 |
-|------|------|----------|
-| v0.1（当前） | 最小可运行内核，验证核心机制 | 事件引擎 + 三类原语 + 局部网络 + Power(Base+Org) |
-| v0.2 | 组织涌现 + 制度突变 + 信任驱动 | OrgEngine + rule_mutation + LegitimacyMult + physique/tech_level |
-| v0.3 | 制度多样性 | IdeologyMod + ContextMod + sovereignty/delegation（支持分封/联邦/极权） |
-| 第二阶段 | 500+ Agent 持续稳定运行 | 性能优化、局部化调度 |
-| 第三阶段 | 外部 Agent 接入 | 开放 API 接口、虚拟劳动力市场 |
-| 最终目标 | 持续运行的制度实验场 | 无终局、无预设价值导向 |
+| 阶段 | 目标 | 关键新增 | 解锁的历史覆盖 |
+|------|------|----------|----------------|
+| v0.1（当前） | 最小可运行内核 | 事件引擎 + 三类原语 + 局部网络 + Power(Base+Org) | 基础财富分化、组织涌现、掠夺 vs 生产均衡 |
+| v0.2 | 信任/技术/可持续性 | LegitimacyMult + physique/tech_level + 掠夺可持续性三因子（mobility/local_dep/destruction） + scarcity_pressure | 清朝全生命周期（游牧→帝国→衰退）、维京/蒙古掠夺文明、闯王式起义、苏联式信任崩溃 |
+| v0.3 | 制度多样性 + 信息不完美 | IdeologyMod + ContextMod + sovereignty/delegation + **perception_bias**（误判） | 分封/联邦/极权、纳粹动员、红色高棉、共和国、技术差距冲击（鸦片战争） |
+| v0.4 | 国际关系 | alliance_chain（联盟连锁）+ sanction/embargo（经济制裁）+ sunk_cost_bias（沉没成本）+ trade_dependency | 二战多方工业化战争、冷战制裁体系、一战联盟连锁反应 |
+| 第二阶段 | 500+ Agent 持续稳定运行 | 性能优化、局部化调度 | — |
+| 第三阶段 | 外部 Agent 接入 | 开放 API 接口、虚拟劳动力市场 | — |
+| 最终目标 | 持续运行的制度实验场 | 无终局、无预设价值导向 | — |
 
 ---
 
