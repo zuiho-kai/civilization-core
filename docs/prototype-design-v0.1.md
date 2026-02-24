@@ -137,6 +137,7 @@ civ_kernel/
 | `local_norm` | `float` | 本地近期成交成功率（EMA），仅 norm 权重高的 Agent 会重度使用 |
 | `exchange_history` | `list[tuple]` | 近 N 次交易记录（对象、成交与否、Δwealth），用于 disposition 漂移 |
 | `activity_level` | `float` | 行动活跃度 ∈ (0, 1]，影响 disposition 漂移贡献和 local_norm 更新权重 |
+| `perception_noise` | `float` | 感知噪声系数 ∈ [0.1, 0.5]，初始随机。Agent 对他人 power 的估计误差幅度 |
 
 禁止添加：prompt 字段、LLM 字段、聊天内容、全局可见字段。
 
@@ -237,6 +238,7 @@ on wake_up(agent):
 - 决策只依赖 `agent.energy`、`agent.wealth`、`agent.neighbors`，**不读取全局状态**
 - 富裕 Agent `next_interval` 更短 → 行动更频繁 → 马太效应自然涌现
 - 没有"最优策略"，行为由当前状态驱动，允许多样化结果
+- **信息不完美**：Agent 对他人 power 的感知带噪声（`perception_noise`），决策基于 perceived 而非 real power → 误判自然产生战争和冒险行为
 
 ### 5.2 行为原语（Produce / Exchange / Coerce）
 
@@ -789,10 +791,13 @@ Agent A wake_up → 决策 COERCE（目标 B）
    org_cost = (org_size ^ 1.5) / COERCE_SCALE_FACTOR   # 组织越大维护越贵
    代价由发起 Agent 本人承担（org 可通过 rules 补贴，但必须记账到个体）
 
-③ 成功概率（对称比例函数）
-   power_A = EffectivePower(A)
-   power_B = EffectivePower(B)
-   p_success = power_A / (power_A + power_B)
+③ 成功概率（对称比例函数 + 感知噪声）
+   power_A = EffectivePower(A)                                    # 自己的真实 power
+   perceived_power_B = EffectivePower(B) × uniform(1 - A.perception_noise, 1 + A.perception_noise)
+   # A 对 B 的 power 估计有噪声，可能高估或低估
+   p_perceived = power_A / (power_A + perceived_power_B)          # A 认为的成功率（决策依据）
+   p_actual    = power_A / (power_A + EffectivePower(B))          # 实际成功率（结算依据）
+   # 决策用 p_perceived，结算用 p_actual → 误判自然产生战争
 
 ④ 结算
    if 成功:
@@ -897,12 +902,12 @@ EV_war = P_success × resource_gain
 | 资源稀缺 | 日本依赖外部石油 | scarcity_pressure → 推高 loot_ratio 和 aggression_bias | ⏳ v0.2（掠夺可持续性框架） |
 | 经济制裁 | 美国石油禁运 | sanction/embargo：和平状态经济损失推高 EV_war | ❌ 需新增 |
 | 工业产能差 | 美国生产力远超日本 | tech_level 在 BaseCapacity 扩展位 | ⏳ v0.2 |
-| 误判对手实力 | 日本高估短期胜算 | perception_bias：perceived_power ≠ real_power | ❌ 需新增 |
+| 误判对手实力 | 日本高估短期胜算 | perception_noise：决策用 perceived_power，结算用 real_power | ✅ v0.1 已实现 |
 | 联盟连锁 | 一对一冲突升级为多方战争 | alliance_chain：org 间防御/进攻协约 | ❌ 需新增 |
 | 沉没成本 | 越打越深不愿止损 | sunk_cost_bias：累计投入推高继续战争倾向 | ❌ 需新增 |
 | 长期消耗战 | 中国人口规模 vs 日本军事优势 | War_Capacity(t) = Production × duration | ✅ 已有（production + 时间模型） |
 
-关键结论：二战模式需要 4 个当前框架中不存在的变量（perception_bias / alliance_chain / sanction / sunk_cost_bias），规划在 v0.3+ 实现。其中 **perception_bias（信息不完美）** 是最关键的——没有它就无法解释为什么理性 Agent 会发起注定失败的战争。
+关键结论：perception_bias 已提前到 v0.1（通过 `perception_noise` 字段），剩余 3 个变量（alliance_chain / sanction / sunk_cost_bias）规划在 v0.4 实现。perception_bias 是最关键的——没有它，理性 Agent 永远不会发起注定失败的战争，系统会过于"理性"导致冲突不足。
 
 #### 5.7.5 Coerce 失败惩罚
 
@@ -1037,9 +1042,9 @@ ResourceLedger    → 因果守恒账本（事件来源合法性审计）
 
 | 阶段 | 目标 | 关键新增 | 解锁的历史覆盖 |
 |------|------|----------|----------------|
-| v0.1（当前） | 最小可运行内核 | 事件引擎 + 三类原语 + 局部网络 + Power(Base+Org) | 基础财富分化、组织涌现、掠夺 vs 生产均衡 |
+| v0.1（当前） | 最小可运行内核 | 事件引擎 + 三类原语 + 局部网络 + Power(Base+Org) + perception_bias | 基础财富分化、组织涌现、掠夺 vs 生产均衡、误判驱动的冲突 |
 | v0.2 | 信任/技术/可持续性 | LegitimacyMult + physique/tech_level + 掠夺可持续性三因子（mobility/local_dep/destruction） + scarcity_pressure | 清朝全生命周期（游牧→帝国→衰退）、维京/蒙古掠夺文明、闯王式起义、苏联式信任崩溃 |
-| v0.3 | 制度多样性 + 信息不完美 | IdeologyMod + ContextMod + sovereignty/delegation + **perception_bias**（误判） | 分封/联邦/极权、纳粹动员、红色高棉、共和国、技术差距冲击（鸦片战争） |
+| v0.3 | 制度多样性 | IdeologyMod + ContextMod + sovereignty/delegation | 分封/联邦/极权、纳粹动员、红色高棉、共和国、技术差距冲击（鸦片战争） |
 | v0.4 | 国际关系 | alliance_chain（联盟连锁）+ sanction/embargo（经济制裁）+ sunk_cost_bias（沉没成本）+ trade_dependency | 二战多方工业化战争、冷战制裁体系、一战联盟连锁反应 |
 | 第二阶段 | 500+ Agent 持续稳定运行 | 性能优化、局部化调度 | — |
 | 第三阶段 | 外部 Agent 接入 | 开放 API 接口、虚拟劳动力市场 | — |
