@@ -13,10 +13,6 @@
 
 1. **强制记录**：里程碑完成 → 更新 `claude-progress.txt` 顶部"最近活动"
 2. **主动查 MCP 记忆**：新 session / 报错卡点 / 设计决策前，先 MCP search 查历史
-3. **MCP 记忆写入（硬规则）**：禁止每轮对话自动调用 `add_message` 保存对话历史。只在以下场景主动写入：
-   - 用户明确说"记住…/添加记忆…"
-   - 正式开发阶段流程节点：里程碑完成、设计决策确认、五方评审结论、ST 结果等关键产出
-   - 闲聊/测试/问答等非开发流程场景一律不写入
 3. **分层进度**：小改动记 `server/progress.md`，大里程碑记 `claude-progress.txt`（详见 `docs/PROGRESS_FILES.md`）
 4. **讨论记录**：功能相关 → `docs/specs/SPEC-XXX/讨论细节/`，通用 → `docs/discussions/`。创建后必须同步更新 `docs/discussions.md` 索引
 5. **防丢失**：对话是临时的，文件是持久的

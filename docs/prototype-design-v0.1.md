@@ -129,6 +129,12 @@ civ_kernel/
 | `status` | `float` | 阶层指数（财富 + 网络中心度计算） |
 | `producing` | `bool` | 是否正在生产（锁定状态） |
 | `org_id` | `int \| None` | 所属组织 ID（None = 无组织） |
+| `disposition` | `dict[str, float]` | 行为倾向权重向量 `{gain, norm, trust}`，归一化，初始随机，可漂移 |
+| `learning_rate` | `float` | 倾向漂移速率 η，每个 Agent 不同，初始随机 ∈ [0.01, 0.3] |
+| `risk_aversion` | `float` | 风险厌恶系数 ∈ [0, 1]，影响 perceived_price_gap 计算 |
+| `local_norm` | `float` | 本地近期成交成功率（EMA），仅 norm 权重高的 Agent 会重度使用 |
+| `exchange_history` | `list[tuple]` | 近 N 次交易记录（对象、成交与否、Δwealth），用于 disposition 漂移 |
+| `activity_level` | `float` | 行动活跃度 ∈ (0, 1]，影响 disposition 漂移贡献和 local_norm 更新权重 |
 
 禁止添加：prompt 字段、LLM 字段、聊天内容、全局可见字段。
 
@@ -199,6 +205,35 @@ while event_queue not empty:
 - 所有状态变更必须由 event 驱动，**禁止周期性全局扫描**
 - 禁止任何形式的"全局 recalculation"
 
+**世界启动（Bootstrap）**：`World.initialize()` 为每个 Agent 各 schedule 一个初始 `wake_up` 事件，触发时间加随机偏移（避免同时唤醒）。之后 Agent 完全自驱。
+
+### 5.1.1 Agent 自决策机制（wake_up）
+
+Agent 没有全局目标，只根据**局部状态**决策，行动后自行 schedule 下一次唤醒：
+
+```
+on wake_up(agent):
+    if agent.energy < ENERGY_THRESHOLD:
+        action = PRODUCE          # 能量不足，优先生产
+    elif agent.wealth < avg_neighbor_wealth × 0.8:
+        action = EXCHANGE         # 相对贫穷，尝试与最信任邻居交换
+    elif 存在财富 < self × 0.5 的邻居 AND coerce_cost 可承受:
+        action = COERCE           # 存在可强制对象，且代价值得
+    else:
+        action = PRODUCE          # 默认行为
+
+    execute(action)
+
+    # 行动后 schedule 下一次唤醒（富裕 Agent 更频繁）
+    next_interval = BASE_INTERVAL / (1 + log(agent.wealth + 1))
+    schedule wake_up(agent, now + next_interval)
+```
+
+关键性质：
+- 决策只依赖 `agent.energy`、`agent.wealth`、`agent.neighbors`，**不读取全局状态**
+- 富裕 Agent `next_interval` 更短 → 行动更频繁 → 马太效应自然涌现
+- 没有"最优策略"，行为由当前状态驱动，允许多样化结果
+
 ### 5.2 行为原语（Produce / Exchange / Coerce）
 
 所有 Agent 行为只能分解为三类：
@@ -221,6 +256,150 @@ class ActionType(Enum):
 | 国家 | Coerce 垄断 + 制度规则集 |
 
 **禁止**预定义"国家""税收""战争"等高层对象，复杂结构必须从原语组合涌现。
+
+### 5.2.1 Exchange 撮合机制
+
+**全流程（事件驱动，无中央撮合，无全局市场）：**
+
+```
+Agent A wake_up → 决策 EXCHANGE
+  ↓
+① 对象选择（weighted random，非 deterministic）
+   score(B) = α * trust(B)
+            + β * perceived_price_gap(B)    # 见下方
+            - γ * search_cost
+   从 neighbors 中按 score 做加权随机抽样
+
+② 估值计算（本地，不访问全局）
+   A 生成 offer_price（基于自身稀缺度）
+   schedule exchange_request(A→B)
+
+③ B 收到请求，计算自身 valuation_B
+   if offer_price 在 B 可接受区间内:
+       → 接受，成交
+   else:
+       → counter_offer(price_B)
+       if 交集存在: → 成交，价格随机取交集内一点（非固定中点）
+       else:        → 拒绝，归类拒绝原因
+
+④ 结算（如成交）
+   ResourceLedger 记录双向转移
+   trust 双向小幅提升
+   双方 Δwealth → 驱动 disposition 漂移
+
+⑤ 拒绝处理（分三层）
+   price_gap 过大  → 更新对方估值模型，trust 不变
+   多次低质量报价 → trust -= small_delta（恶意压价惩罚）
+   已知违约历史   → trust -= larger_delta，加入黑名单
+```
+
+**防刷约束**：每次 wake_up 最多发起 `MAX_EXCHANGE_ATTEMPTS`（默认 2）次 exchange，每次消耗 energy，超限直接跳过。
+
+**perceived_price_gap 计算（局部可观测，按 disposition 加权）：**
+
+```python
+gap_raw = abs(self.wealth - neighbor.wealth) / MAX_WEALTH
+
+# gain 倾向高 → 直接用财富差（愣头青）
+gap_gain = gap_raw
+
+# norm 倾向高 → 财富差 × 本地成交风气（社会型）
+gap_norm = self.local_norm * gap_raw
+
+# trust 倾向高 → 信任够就忽略价格，不够直接拒绝（圈子型）
+gap_trust = 0.0 if trust(neighbor) > TRIBE_THRESHOLD else -inf
+
+# 加权混合
+perceived_gap = (
+    disposition['gain']  * gap_gain  +
+    disposition['norm']  * gap_norm  +
+    disposition['trust'] * gap_trust
+) * (1 - self.risk_aversion)   # 风险厌恶压缩感知差距
+```
+
+### 5.2.2 Agent Disposition 模型
+
+**连续权重向量，每个 Agent 独立，初始随机，终身可漂移：**
+
+```python
+# 初始化（每个 Agent 不同）
+disposition = random_simplex_point()  # [gain, norm, trust]，sum = 1.0
+learning_rate = uniform(0.01, 0.3)    # 固执 vs 见风使舵
+
+# 每次 Exchange 完成后更新
+outcome = Δwealth   # v0.1 信号：自身财富变化（极简，本地）
+
+for dim in ['gain', 'norm', 'trust']:
+    disposition[dim] += learning_rate * outcome * contribution[dim]
+
+disposition = normalize(disposition)  # 保持 sum = 1.0
+```
+
+`contribution[dim]` = 做该决策时该维度的归一化权重（归因给影响最大的维度）。
+
+**涌现效果预期：**
+
+| 动态 | 机制 |
+|------|------|
+| 兄弟会形成 | `trust` 权重高的 Agent 聚集，互相强化 |
+| 制度突变早期信号 | `norm` 权重高的 Agent 感知违约率上升，率先退出 |
+| 马太效应加剧 | 富裕 Agent 强化现有倾向，行为趋于极端 |
+| 地区风气分化 | 不同子网中 `local_norm` 独立演化 |
+
+**v0.2 可扩展：** outcome 信号升级为 `Δwealth - avg_neighbor_Δwealth`（相对收益）。
+
+### 5.2.3 行为修正因子
+
+四个修正因子叠加在决策和学习过程上，增加个体差异和网络层次感：
+
+**① 风险感知（risk_aversion）**
+
+同一个 perceived_price_gap，不同 Agent 对风险的敏感度不同；谨慎型 Agent 宁愿错过好机会也不想被 Coerce。
+
+```python
+perceived_gap *= (1 - risk_aversion)   # risk_aversion ∈ [0, 1]
+```
+
+效果：提高系统对极端财富差的鲁棒性，防止所有 Agent 一窝蜂涌向高差价交易。
+
+**② 交易频率 / 活跃度（activity_level）**
+
+现实中有些 Agent 很活跃，有些低调。频率高的 Agent 对 norm 的反馈更快，也更容易成为制度催化剂。
+
+```python
+contribution = disposition * activity_level
+```
+
+用于 `local_norm` 更新和 trust 变化计算的加权。高活跃 Agent 的每次行为对局部网络影响更大，自然形成"意见领袖"效应，增加局部网络差异性。
+
+**③ 历史波动 / 信号噪声（EMA 平滑 local_norm）**
+
+社会型 Agent（`norm` 权重高）根据近期趋势而非单次事件调整 disposition，模拟群体学习延迟：
+
+```python
+local_norm = EMA(recent_trade_success, alpha=0.3)
+```
+
+`alpha` 越小，记忆越长，对短期噪声越不敏感。效果：避免 norm 过度敏感导致过快收敛或群体恐慌。
+
+**④ 社会距离（social_distance）**
+
+即便在局部网络内，也有亲疏关系。trust 的有效值根据邻居的网络跳数衰减：
+
+```python
+effective_trust = trust / (1 + social_distance)
+```
+
+`social_distance` = 两个 Agent 之间的最短路径跳数（直接邻居 = 0，邻居的邻居 = 1，以此类推）。效果：自然产生圈子层次，`trust` 倾向高的 Agent 形成紧密部落，外层信任衰减明显。
+
+**四因子协同涌现预期：**
+
+| 组合 | 涌现效果 |
+|------|----------|
+| 高 activity + 高 norm | 制度催化剂：快速传播交易规范，带动局部风气 |
+| 高 risk_aversion + 低 activity | 保守隐士：几乎不交易，财富缓慢增长，抗 Coerce |
+| 低 social_distance + 高 trust | 核心圈子：高效内部交换，排斥外部 Agent |
+| 高 activity + 低 risk_aversion | 投机者：频繁高风险交易，财富波动大，容易暴富或破产 |
 
 ### 5.3 生产时间占用模型
 
@@ -255,6 +434,7 @@ Agent.neighbors: dict[agent_id, trust_value]
 - Exchange 成功 → trust 小幅提升
 - Coerce 成功（对方视角）→ trust 大幅下降
 - 信息/事件只在 trust > threshold 的直接邻居间传播
+- **社会距离衰减**：`effective_trust = trust / (1 + social_distance)`，直接邻居 distance=0（全额 trust），二跳邻居 distance=1（trust 减半），以此类推。Agent 只能感知 ≤2 跳范围内的邻居信息
 - **禁止**全局广播、全局价格查询、全局状态感知
 
 ### 5.5 组织自动生成
