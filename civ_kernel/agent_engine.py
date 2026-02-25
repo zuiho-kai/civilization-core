@@ -67,20 +67,80 @@ def compute_ev_coerce(agent: Agent, target: Agent, world: World) -> float:
 def compute_ev_join(agent: Agent, org, world: World) -> float:
     sz = len(org.members)
     rules = org.rules
-    production = compute_ev_produce(agent, world)
-    e_economic = ((1 - rules.get('tax_rate', 0)) * production
-                  + org.treasury * rules.get('redistribution_ratio', 0) / max(sz, 1)
-                  + rules.get('public_goods_efficiency', 0) * math.log(sz + 1) * production)
-    e_security = 0.1 * agent.wealth  # 简化：组织提供 10% 保护
-    c_tax = rules.get('tax_rate', 0) * production
+
+    # 修复1：直接计算税前产出，不调用 compute_ev_produce（它已含税，会导致双重扣税）
+    cost = min(agent.energy, config.PRODUCTION_ENERGY_COST)
+    coord = 1.0 + rules.get('public_goods_efficiency', 0) * math.log(sz + 1)
+    gross_production = cost * config.PRODUCTION_EFFICIENCY * coord
+
+    # 税后收入
+    after_tax_income = gross_production * (1 - rules.get('tax_rate', 0))
+
+    # 再分配收益：用组织全体成员的实际产出之和计算税收池（而非假设所有人产出相同）
+    total_gross = 0.0
+    for m in org.members:
+        ma = world.agents.get(m)
+        if ma:
+            mc = min(ma.energy, config.PRODUCTION_ENERGY_COST)
+            total_gross += mc * config.PRODUCTION_EFFICIENCY * coord
+    total_tax_income = rules.get('tax_rate', 0) * total_gross
+    redist_ratio = rules.get('redistribution_ratio', 0)
+    total_redistribution = total_tax_income * redist_ratio
+    # 未再分配的税收进入公共基金（增强公共品）
+    public_fund = total_tax_income * (1 - redist_ratio)
+
+    # 计算组织平均财富
+    avg_wealth = sum(world.agents[m].wealth for m in org.members if m in world.agents) / max(sz, 1)
+
+    # 贫困度：低于平均财富的部分
+    poverty_score = max(0, avg_wealth - agent.wealth)
+    total_poverty = sum(max(0, avg_wealth - world.agents[m].wealth)
+                       for m in org.members if m in world.agents)
+
+    if total_poverty > 0:
+        redistribution_income = total_redistribution * (poverty_score / total_poverty)
+    else:
+        redistribution_income = 0  # 没有穷人，不分配
+
+    # 公共品收益：与税率正相关（税收资助公共品），穷人边际效用更高
+    tax_rate = rules.get('tax_rate', 0)
+    base_public_goods = rules.get('public_goods_efficiency', 0) * math.log(sz + 1) * gross_production * 0.3 * (1 + tax_rate * 2) + math.log(1 + public_fund / max(sz, 1))
+    # 穷人公共品加成：财富低于平均时，公共品效用放大
+    if avg_wealth > 0:
+        poverty_ratio = max(0.5, min(2.0, avg_wealth / max(agent.wealth, 1.0)))
+    else:
+        poverty_ratio = 1.0
+    public_goods = base_public_goods * poverty_ratio
+
+    # 安全收益
+    e_security = 0.1 * agent.wealth
+
+    # 成本
     c_coercion = 0.1 * rules.get('punishment_severity', 0) * agent.wealth
-    c_exit = rules.get('exit_penalty', 0) * agent.wealth * 0.1
-    return e_economic + e_security - c_tax - c_coercion - c_exit
+    c_exit = rules.get('exit_penalty', 0) * agent.wealth * 0.01
+
+    # 修复3：合法性只影响公共品和安全收益，不影响个人税后收入
+    legitimacy_factor = org.legitimacy
+    personal_income = after_tax_income + redistribution_income
+    collective_benefit = (public_goods + e_security) * legitimacy_factor
+    costs = c_coercion + c_exit
+
+    return personal_income + collective_benefit - costs
 
 
 def compute_ev_outside(agent: Agent, world: World) -> float:
     production = compute_ev_produce(agent, world)
-    coerce_risk = 0.15 * agent.wealth  # 简化
+    # 修复5：基于邻居实际威胁动态计算风险，而非固定比例
+    threat = 0.0
+    for nb_id in agent.neighbors:
+        nb = world.agents.get(nb_id)
+        if nb and nb.wealth > agent.wealth * 0.5:
+            power_nb = effective_power(nb, world)
+            power_me = effective_power(agent, world)
+            p_attack = power_nb / (power_nb + power_me)
+            potential_loss = min(agent.wealth * config.LOOT_RATIO, nb.energy * config.LOOT_EFFICIENCY)
+            threat += p_attack * potential_loss * 0.1  # 0.1 = 每周期被攻击概率
+    coerce_risk = max(0.05 * agent.wealth, threat)  # 最低5%底线
     return production - coerce_risk
 
 
@@ -188,7 +248,7 @@ def handle_produce_complete(world: World, event: Event) -> None:
     ledger = ResourceLedger()
     energy_cost = event.payload.get('energy_cost', config.PRODUCTION_ENERGY_COST)
     wealth_gain = ledger.produce(world, agent.id, energy_cost)
-    wealth_gain = ledger.tax_income(world, agent.id, wealth_gain)
+    # 修复2：移除此处征税，税收统一由 handle_org_tax_collection 处理，避免双重征税
 
 
 def handle_exchange_request(world: World, event: Event) -> None:
@@ -325,7 +385,7 @@ def _do_coerce_settle(world: World, source: Agent, target: Agent) -> None:
         loot = min(loot, target.wealth)
         if loot > 0:
             ledger.transfer_wealth(world, target.id, source.id, loot)
-        source.wealth -= min(wealth_cost, source.wealth)
+        source.wealth = max(0, source.wealth - wealth_cost)
         update_trust(world, target.id, source.id, -0.3)
         # 邻居声誉惩罚
         for nb_id in list(target.neighbors.keys()):
@@ -338,7 +398,7 @@ def _do_coerce_settle(world: World, source: Agent, target: Agent) -> None:
                 org.conflict_cost += wealth_cost
     else:
         # 失败
-        source.wealth -= min(wealth_cost, source.wealth)
+        source.wealth = max(0, source.wealth - wealth_cost)
         penalty = _coerce_fail_penalty(source, target, world)
         source.wealth = max(0, source.wealth - penalty)
         update_trust(world, target.id, source.id, -0.2)
@@ -389,6 +449,9 @@ def _check_org_decisions(world: World, agent: Agent) -> None:
 
 
 def _schedule_next_wakeup(world: World, agent: Agent) -> None:
+    # 防御性检查：确保财富非负
+    if agent.wealth < 0:
+        agent.wealth = 0
     interval = config.BASE_INTERVAL / (1 + math.log(agent.wealth + 1))
     jitter = random.uniform(-0.5, 0.5)
     _schedule(world, Event(

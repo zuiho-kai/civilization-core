@@ -4,6 +4,9 @@ import sys
 import io
 import random
 import math
+import pickle
+from pathlib import Path
+from typing import Optional
 
 # Windows GBK 编码兼容
 if sys.stdout.encoding and sys.stdout.encoding.lower().startswith('gbk'):
@@ -50,10 +53,23 @@ def initialize_world() -> World:
     return world
 
 
-def run(seed: int | None = None) -> World:
+def run(seed: int | None = None, resume_from: Optional[str] = None) -> World:
     if seed is not None:
         random.seed(seed)
-    world = initialize_world()
+
+    # 尝试从 checkpoint 恢复
+    if resume_from:
+        checkpoint_path = Path(resume_from)
+        if checkpoint_path.exists():
+            print(f"从 checkpoint 恢复: {checkpoint_path}")
+            with open(checkpoint_path, 'rb') as f:
+                world = pickle.load(f)
+        else:
+            print(f"Checkpoint 不存在: {checkpoint_path}，从头开始")
+            world = initialize_world()
+    else:
+        world = initialize_world()
+
     engine = EventEngine(world)
 
     # 注册事件处理器

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 # --- 世界参数 ---
 NUM_AGENTS = 100
-MAX_VIRTUAL_TIME = 3000.0
+MAX_VIRTUAL_TIME = 10000.0   # 10000 轮模拟
 METRICS_INTERVAL = 50  # 每 N 个事件记录一次指标
+CHECKPOINT_INTERVAL = 2000  # 每 2000 轮保存一次 checkpoint
 
 # --- 网络参数 ---
 WS_K = 10           # Watts-Strogatz 每侧邻居数（平均度 = K）
@@ -24,7 +25,7 @@ REGEN_RATE = 0.1     # energy 每虚拟时间单位回复
 BASE_INTERVAL = 5.0  # wake_up 基础间隔
 ENERGY_THRESHOLD = 0.3
 WEALTH_COMPARE_RATIO = 0.8   # 相对贫穷判断
-COERCE_WEALTH_RATIO = 0.5    # 存在可强制对象的判断
+COERCE_WEALTH_RATIO = 0.3    # 存在可强制对象的判断（降低门槛）
 
 # --- 生产参数 ---
 PRODUCTION_EFFICIENCY = 1.0
@@ -43,7 +44,7 @@ LOOT_EFFICIENCY = 2.0
 COUNTER_SEVERITY = 0.3
 BASE_COERCE_ENERGY = 0.2
 BASE_COERCE_WEALTH = 1.0
-COERCE_SCALE_FACTOR = 50.0
+COERCE_SCALE_FACTOR = 100.0  # 降低组织规模惩罚
 
 # --- Power 参数 ---
 POWER_A1 = 1.0   # energy 权重
@@ -62,8 +63,8 @@ EXIT_THRESHOLD = 0.1
 
 # --- 组织默认 rules ---
 DEFAULT_RULES = {
-    'tax_rate': 0.05,
-    'redistribution_ratio': 0.5,
+    'tax_rate': 0.20,  # 提高到 20%（从 5%）
+    'redistribution_ratio': 0.60,  # 提高到 60%（从 30%）
     'public_goods_efficiency': 0.3,
     'internal_coercion_tolerance': 0.2,
     'punishment_severity': 0.3,
@@ -84,11 +85,25 @@ MUTATABLE_KEYS = [
 ]
 
 MUTATION_STEP = 0.05
-GRIEVANCE_THRESHOLD = 0.3
+GRIEVANCE_THRESHOLD = 0.2  # 20% 不满即可突变
+
+# --- 组织维护成本参数 ---
+ORG_BASE_MANAGEMENT_COST = 0.3  # 基础管理成本（从1.0降低，避免组织入不敷出）
+ORG_SIZE_PENALTY_FACTOR = 1.0   # 规模惩罚系数
+
+# --- 组织腐化参数 ---
+EFFICIENCY_DECAY_BASE = 0.995  # 每周期乘法衰减（渐进式）
+EFFICIENCY_SIZE_PENALTY = 0.02  # 规模惩罚系数（降低）
+LEGITIMACY_DECAY_BASE = 0.998  # 合法性乘法衰减
+LEGITIMACY_INEQUALITY_PENALTY = 0.05  # 不平等惩罚系数（降低）
+MUTATION_SUCCESS_BOOST = 0.15  # 改革成功时效率提升
+MUTATION_FAILURE_PENALTY = 0.05  # 改革失败时效率下降
+DISSOLUTION_THRESHOLD = 0.3  # 效率 < 30% 时组织解散
 
 # --- 制度突变触发阈值 ---
-EFFICIENCY_THRESHOLD = 0.3
-MIGRATION_THRESHOLD = 0.2
+EFFICIENCY_THRESHOLD = 0.50  # 效率 < 50% 触发改革（更容易触发）
+MIGRATION_THRESHOLD = 0.10    # 退出率 > 10% 触发
+LEGITIMACY_THRESHOLD = 0.7   # 合法性 < 70% 触发
 
 # --- 规则范围 ---
 RULES_MIN = {k: 0.0 for k in DEFAULT_RULES}
