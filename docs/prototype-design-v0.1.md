@@ -4,6 +4,45 @@
 
 ---
 
+## 0. 通俗总结（大白话版）
+
+**一句话：500 个小人在一张地图上自己干活、做买卖、抢东西，时间久了自动长出"国家"和"制度"。**
+
+**世界怎么运转：** 没有回合制，没有上帝之手。每个小人自己定闹钟醒来，醒了看看自己什么情况，做一件事，再定下一个闹钟。富人闹钟响得快（行动频繁），穷人响得慢。
+
+**小人能干的事（只有三件）：**
+
+| 动作 | 大白话 | 没组织时 | 有组织时 |
+|------|--------|----------|----------|
+| **生产** | 花时间干活换钱，干活期间干不了别的 | 自己种地 | 在组织框架下生产，享受公共品加成 |
+| **交换** | 跟认识的人做买卖，双方谈价，谈不拢就算了 | 赶集/以物易物 | 制度内交易——交税、受保护、有公共服务 |
+| **强制** | 直接从别人手里抢，但自己也要付代价 | 抢劫 | 组织化的征税/战争 |
+
+所有复杂行为都是这三件事的组合——"税收"就是组织化的强制，"战争"就是连续的强制，"联盟"就是反复交换攒出来的信任。
+
+**小人怎么决策：** 每次醒来做一道选择题——干活赚得多，还是做买卖赚得多，还是抢人赚得多？哪个期望收益高就干哪个。但小人看不清别人的实力（有个"眼神不好"参数），经常高估自己、低估对手，所以会发起注定失败的抢劫——这就是战争的来源。
+
+**两种资源：**
+
+| 资源 | 大白话 | 特点 |
+|------|--------|------|
+| **体力**（energy） | 干活要花，花完了慢慢恢复，别人抢不走 | 相当于时间/劳动力 |
+| **财富**（wealth） | 干活产出的东西，可以被交易、被抢 | 相当于粮食/金银 |
+
+体力抢不走 = 你可以奴役一个人让他给你干活（控制他的财富产出方向），但不能把他的命抽走让自己多活一份。
+
+**小人的性格：** 每个小人有一组性格参数——贪利型（只看钱）、从众型（看周围人怎么做）、圈子型（只跟信得过的人打交道）。性格不是固定的，赚到钱了就更贪，被骗了就更保守。
+
+**社交网络：** 小人只认识身边的人（平均 10 个邻居），不知道世界另一头在发生什么。初始是小世界网络——大部分人只认识邻居，但偶尔有几条远距离连线。
+
+**组织怎么冒出来的：** 不是系统自动贴标签，是小人自己发起的。某个小人算了一笔账，发现"我跟身边这几个人如果结伙，交税虽然亏一点，但被抢的风险小了、公共品加成高了，总收益更大"→ 他向邻居提议建组织 → 每个邻居独立算账决定加不加入 → 同意人数够了就成立。跟玩家自己建公会一个道理。
+
+**制度怎么变：** 不是随机碰运气。当组织内部出了问题（效率下降、成员跑路、内部冲突），每个成员会计算"哪条规则最坑我"——穷人觉得税太高，边境居民觉得防御太弱。然后按实力加权（不是一人一票），权重够大的诉求就执行。所以制度被强者利益塑造 → 弱者不满 → 退出或起义 → 新一轮突变。
+
+**验收标准（跑起来要看到什么）：** 贫富分化、基尼系数有波动、至少冒出一个组织、至少发生一次制度变异、抢人不是永远最优解、不同区域的"物价"不一样。
+
+---
+
 ## 1. 项目概述
 
 ### 1.1 项目定位
@@ -521,17 +560,54 @@ Agent.neighbors: dict[agent_id, trust_value]
 - **社会距离衰减**：`effective_trust = trust / (1 + social_distance)`，直接邻居 distance=0（全额 trust），二跳邻居 distance=1（trust 减半），以此类推。Agent 只能感知 ≤2 跳范围内的邻居信息
 - **禁止**全局广播、全局价格查询、全局状态感知
 
-### 5.5 组织自动生成
+### 5.5 组织成立（Agent 发起，非系统扫描）
 
-组织不可手动创建，必须从网络结构涌现：
+组织不可手动创建，也不由系统自动检测生成。**组织是 Agent 主动提议、邻居独立决策的结果。**
 
 ```
-OrgEngine（周期性局部扫描，非全局）:
-  对每个连通子图计算密度和交互频率
-  if density > DENSITY_THRESHOLD
-     and exchange_frequency > FREQ_THRESHOLD:
-       spawn Organization(members=subgraph_nodes)
+Agent A wake_up → 评估是否发起组织提议
+  ↓
+① 前置条件（全部满足才进入 EV 计算）
+   - A 当前无 org（v0.1 限制：已在 org 的 Agent 不能发起新 org）
+   - A.proposal_cooldown_until < now（冷却期已过）
+   - A 的高 trust 邻居数 ≥ MIN_ORG_SIZE - 1（至少凑够最小人数）
+     high_trust_neighbors = [n for n in neighbors if trust[n] > PROPOSE_TRUST_THRESHOLD]
+
+② EV 驱动决策（不是"关系好就建组织"，而是"算过账觉得建组织划算"）
+   假设 org 以默认 rules 成立，成员 = A + high_trust_neighbors
+   if EV_join(A, hypothetical_org) > EV_outside(A) + PROPOSE_MARGIN:
+       → schedule org_proposal(A, candidate_members)
+
+③ 候选成员独立决策
+   for each candidate B in candidate_members:
+       B 独立计算 EV_join(B, hypothetical_org) vs EV_outside(B)
+       if EV_join > EV_outside → 同意
+       else → 拒绝
+
+④ 结果
+   if 同意人数 ≥ MIN_ORG_SIZE:
+       → 组织成立，初始 rules 为默认参数集
+       → 所有同意者加入，拒绝者不加入
+   else:
+       → 提议失败
+       → A.proposal_cooldown_until = now + COOLDOWN_BASE × BACKOFF_FACTOR ^ n_failures
+       （指数退避：第 1 次失败等 10 时间单位，第 2 次 20，第 3 次 40...）
 ```
+
+**关键设计决策：**
+- 驱动力是 EV 计算，不是 trust 密度。trust 高只是前置门槛，真正决定的是"建了组织我能不能赚更多"
+- 每个候选成员独立算账，不是"A 拉人头"——B 觉得不划算就不加入，哪怕跟 A trust 很高
+- v0.1 限制：已在 org 的 Agent 不能发起新 org（防止组织分裂/合并的复杂度爆炸，v0.2 放开）
+
+**默认参数：**
+
+| 参数 | 默认值 | 含义 |
+|------|--------|------|
+| `PROPOSE_TRUST_THRESHOLD` | 0.6 | 候选成员最低 trust 门槛 |
+| `PROPOSE_MARGIN` | 0.1 | EV 差距余量（防止微弱优势就发起提议） |
+| `COOLDOWN_BASE` | 10.0 | 提议失败后基础冷却时间 |
+| `BACKOFF_FACTOR` | 2.0 | 指数退避系数 |
+| `MIN_ORG_SIZE` | 3 | 最小成员数 |
 
 生成的 Organization：
 - 初始 rules 为默认参数集（低税率、平均分配）
@@ -539,6 +615,11 @@ OrgEngine（周期性局部扫描，非全局）:
 - 当 efficiency 下降或 conflict_cost 过高时，触发 `rule_mutation_event`
 
 组织解散条件：成员数低于 `MIN_ORG_SIZE`（默认 3）。
+
+**遗留问题（v0.2+）：**
+- 组织合并：两个 org 的成员互相高 trust → 合并提议
+- 组织分裂：内部形成两个低 trust 子群 → 分裂提议
+- 已在 org 的 Agent 发起新 org → 放开 v0.1 限制后支持"叛出建国"
 
 ### 5.5.1 Organization.rules 枚举
 
@@ -725,9 +806,11 @@ migration_rate = (n_exits_recent + n_joins_recent) / org_size / time_window
 - 群体迁移：当前只有个体迁移，v0.2 可支持 org 子群集体迁移（如部落分裂/合并）
 - 迁移成本：v0.1 仅有 exit_penalty，v0.2 可引入距离/文化差异成本
 
-### 5.6 制度压力触发突变
+### 5.6 制度压力触发突变（成员驱动，非随机抖动）
 
-制度变化不走投票流程，而是由结构压力驱动：
+制度变化由结构压力触发，**突变方向由成员诉求驱动**，不是随机扰动。
+
+**① 触发条件（不变）：**
 
 ```python
 if org.efficiency_drop > EFFICIENCY_THRESHOLD
@@ -736,25 +819,70 @@ if org.efficiency_drop > EFFICIENCY_THRESHOLD
        schedule Event(type='rule_mutation', target=org.id)
 ```
 
-**突变机制（具体化）：**
+**② 突变机制（成员痛点驱动）：**
 
 ```python
-# 可突变的 key（不是所有 rule 都突变）
 MUTATABLE_KEYS = [
     'tax_rate', 'redistribution_ratio', 'delegation_rate',
     'external_aggression_bias', 'loot_policy',
     'entry_barrier', 'exit_penalty'
 ]
-# ideology_strength 和 public_goods_efficiency 不参与随机突变
+# ideology_strength 和 public_goods_efficiency 不参与常规突变
 # （前者需要意识形态事件驱动，后者需要技术事件驱动）
 
-MUTATION_STEP = 0.05  # 每次扰动幅度
+MUTATION_STEP = 0.05  # 每次调整幅度
 
-on rule_mutation:
+on rule_mutation(org):
+    # Step 1: 每个成员计算"哪个参数最伤我"
+    grievances = {}  # {key: weighted_direction}
+    for member in org.members:
+        pain_key, pain_direction = compute_grievance(member, org)
+        # pain_key: 最影响该成员 EV 的那个参数
+        # pain_direction: 该成员希望这个参数往哪调（+1 或 -1）
+        weight = EffectivePower(member)  # 实力说话，不是一人一票
+        grievances[pain_key] = grievances.get(pain_key, 0) + weight * pain_direction
+
+    # Step 2: 超过权重阈值的诉求都执行（一次可动多个参数）
+    total_weight = sum(EffectivePower(m) for m in org.members)
     for key in MUTATABLE_KEYS:
-        org.rules[key] += normal(0, MUTATION_STEP)
-        org.rules[key] = clamp(org.rules[key], MIN[key], MAX[key])
+        if key in grievances and abs(grievances[key]) > total_weight * GRIEVANCE_THRESHOLD:
+            direction = sign(grievances[key])
+            org.rules[key] += direction * MUTATION_STEP
+            org.rules[key] = clamp(org.rules[key], MIN[key], MAX[key])
 ```
+
+**③ compute_grievance 逻辑（每个成员的"最大痛点"）：**
+
+```python
+def compute_grievance(member, org):
+    # 对每个可突变参数，估算"如果这个参数变一点，我的 EV 会怎样"
+    current_ev = EV_join(member, org)
+    max_ev_gain = 0
+    pain_key = None
+    pain_direction = 0
+
+    for key in MUTATABLE_KEYS:
+        for direction in [+1, -1]:
+            hypothetical_rules = org.rules.copy()
+            hypothetical_rules[key] += direction * MUTATION_STEP
+            hypothetical_ev = EV_join_with_rules(member, org, hypothetical_rules)
+            ev_gain = hypothetical_ev - current_ev
+            if ev_gain > max_ev_gain:
+                max_ev_gain = ev_gain
+                pain_key = key
+                pain_direction = direction
+
+    return pain_key, pain_direction
+```
+
+**设计理由（为什么不用随机抖动）：**
+
+| | 随机抖动（旧） | 成员驱动（新） |
+|--|---------------|---------------|
+| 因果链 | 无——tax_rate 下降可能是运气 | 有——tax_rate 下降是因为穷成员承压，且他们 power 够大 |
+| 可验收性 | 低——"制度压力事件"只证明触发了，不证明方向对 | 高——可追溯"谁推动了什么改变、为什么" |
+| 历史覆盖 | 随机游走，难以复现特定制度轨迹 | 利益驱动，自然产生"强者塑造制度"的现象 |
+| 涌现效果 | 制度漫游 | 制度被强者利益塑造 → 弱者不满 → 退出/起义 → 新一轮突变 |
 
 **突变阈值默认值：**
 
@@ -763,6 +891,7 @@ on rule_mutation:
 | `EFFICIENCY_THRESHOLD` | 0.3 | efficiency 下降超过 30% 触发 |
 | `MIGRATION_THRESHOLD` | 0.2 | 单周期内 20% 成员退出触发 |
 | `CONFLICT_THRESHOLD` | 成员 avg_wealth × 0.5 | 累计冲突代价过高触发 |
+| `GRIEVANCE_THRESHOLD` | 0.3 | 诉求权重占总权重 30% 以上才执行 |
 
 突变后 efficiency 和 conflict_cost 重新积累，允许多次迭代演化。
 
@@ -1074,7 +1203,7 @@ v0.1 目标 50–200 Agent，但架构设计必须保证可扩展至 500+：
 |------|------|
 | EventQueue | O(log N) 优先队列，禁止 O(N) 全扫描 |
 | NetworkGraph | 稀疏图，平均度 < 20，禁止全连接 |
-| OrgEngine | 增量式局部检测（见下方说明），禁止每事件全图遍历 |
+| OrgEngine | 组织由 Agent 发起（§5.5），OrgEngine 负责解散检测和健康度监控 |
 | AgentEngine | 无全局锁，事件局部化 |
 
 关键数据结构：
@@ -1087,29 +1216,21 @@ OrganizationIndex → dict[id, Organization]
 ResourceLedger    → 因果守恒账本（事件来源合法性审计）
 ```
 
-**OrgEngine 扫描策略说明（review 4.1 澄清）：**
+**OrgEngine 职责说明（review 4.1 澄清）：**
+
+组织生成已改为 Agent 发起（§5.5），OrgEngine 不再负责"扫描网络自动建组织"。OrgEngine 剩余职责：
+
+1. **解散检测**：成员数 < MIN_ORG_SIZE 时解散 org
+2. **健康度监控**：跟踪 efficiency、conflict_cost、migration_rate → 触发 rule_mutation_event（§5.6）
+3. **成员索引维护**：Agent 加入/退出时更新 org.members
 
 §2 原则"禁止全局扫描"的精确边界：
 
 | 允许 | 禁止 |
 |------|------|
-| 事件触发的局部邻域扫描（BFS ≤ 2 跳） | 每个 event 都全图遍历 |
-| 低频定期全图 org 检测（每 N 个事件执行一次，N ≥ 100） | 高频全图扫描（每个 event 都检测） |
-| trust 变更时增量更新邻域密度 | 实时维护全局密度矩阵 |
-
-v0.1 实现策略：**增量式 org 检测**
-
-```python
-# 不是每次 event 都全图遍历，而是：
-# 1. 每次 trust 变更时，更新变更边所在局部的密度缓存
-# 2. 当密度缓存越过阈值 → schedule org_check event
-# 3. org_check event 只遍历该局部连通分量（通常 < 30 节点）
-# 4. 作为兜底，每 ORG_SCAN_INTERVAL 个事件执行一次全图检测（N=500 时 ≈ O(500+E) ≈ O(5500)，可接受）
-
-ORG_SCAN_INTERVAL = 200  # 每处理 200 个事件做一次全图兜底扫描
-```
-
-这样日常 O(1)~O(30)，兜底扫描频率低且复杂度可控。
+| Agent wake_up 时局部 EV 计算（只访问自己的 neighbors） | 每个 event 都全图遍历 |
+| org 内成员变更时更新 org 指标（O(org_size)） | 实时维护全局密度矩阵 |
+| 低频全图 Gini 等指标计算（每 N 个事件一次，仅 metrics.py） | 高频全图扫描 |
 
 ---
 
