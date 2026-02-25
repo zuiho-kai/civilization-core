@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # --- 世界参数 ---
 NUM_AGENTS = 100
-MAX_VIRTUAL_TIME = 1000.0
+MAX_VIRTUAL_TIME = 3000.0
 METRICS_INTERVAL = 50  # 每 N 个事件记录一次指标
 
 # --- 网络参数 ---

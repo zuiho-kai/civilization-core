@@ -198,28 +198,34 @@ def handle_exchange_request(world: World, event: Event) -> None:
         return
     if target.producing:
         return
-    # 估值
-    offer = source.wealth * 0.1
-    valuation = target.wealth * 0.1
+    # 估值：基于本地邻居均值的稀缺度定价（不同区域自然分化）
+    src_local_avg = _avg_neighbor_wealth(source, world)
+    tgt_local_avg = _avg_neighbor_wealth(target, world)
+    # 报价 = 基础比例 × 本地稀缺度修正
+    offer = source.wealth * 0.1 * (1 + 0.5 * (source.wealth / max(src_local_avg, 0.1) - 1))
+    valuation = target.wealth * 0.1 * (1 + 0.5 * (target.wealth / max(tgt_local_avg, 0.1) - 1))
+    offer = max(0.01, offer)
+    valuation = max(0.01, valuation)
     spread = abs(offer - valuation)
     # 成交判断
     trust_ab = source.neighbors.get(target.id, 0)
-    accept_threshold = 0.3 * (1 - trust_ab)  # trust 高更容易成交
+    accept_threshold = 0.3 * (1 - trust_ab)
     if spread < max(offer, valuation) * (accept_threshold + 0.1):
-        # 成交
+        # 成交：实际成交价记录到 history（用于价格方差度量）
         price = (offer + valuation) / 2
         from .resource import ResourceLedger
         ledger = ResourceLedger()
-        if source.wealth >= price and target.wealth >= price:
-            ledger.transfer_wealth(world, source.id, target.id, price * 0.5)
-            ledger.transfer_wealth(world, target.id, source.id, price * 0.5)
-            delta_w = price * 0.05  # 交易利润
+        transfer_amount = min(price * 0.5, source.wealth, target.wealth)
+        if transfer_amount > 0:
+            ledger.transfer_wealth(world, source.id, target.id, transfer_amount)
+            ledger.transfer_wealth(world, target.id, source.id, transfer_amount)
+            delta_w = transfer_amount * 0.05
             source.wealth += delta_w
             target.wealth += delta_w
             from .network import update_trust
             update_trust(world, source.id, target.id, 0.02)
-            source.exchange_history.append((target.id, True, delta_w))
-            target.exchange_history.append((source.id, True, delta_w))
+            source.exchange_history.append((target.id, True, price))
+            target.exchange_history.append((source.id, True, price))
             _update_disposition(source, delta_w, 'gain')
             _update_disposition(target, delta_w, 'gain')
             # 更新 local_norm
