@@ -199,10 +199,14 @@ class Event:
 
 ```
 EventEngine 主循环：
-while event_queue not empty:
+while event_queue not empty and clock < MAX_VIRTUAL_TIME:
     event = heappop(event_queue)       # 弹出最早事件
     clock = event.trigger_time         # 推进虚拟时间
     dispatch(event)                    # 执行对应 handler
+
+# MAX_VIRTUAL_TIME：运行时长上限（虚拟时间单位），默认 10000.0
+# 队列不会自然清空（wake_up 自驱循环），因此终止靠时间上限
+# 也可用 MAX_EVENTS 作为备选终止条件（处理事件数上限）
 ```
 
 工程约束：
@@ -498,7 +502,19 @@ Agent.neighbors: dict[agent_id, trust_value]
 ```
 
 规则：
-- 初始网络为随机稀疏图，平均度 < 20
+- **初始图模型：Watts-Strogatz 小世界网络**
+  - 参数：N=Agent 数量，K=10（初始每侧邻居数，平均度=K），β=0.15（重连概率）
+  - 选择理由：同时具备高聚类系数（局部紧密社区）和短平均路径长度（跨社区桥接），比 ER 随机图更接近真实社会网络结构
+  - 平均度 < 20（K=10 → 平均度=10，满足约束）
+- **初始 trust 赋值：距离衰减 + 噪声**
+  ```python
+  trust_ij = 0.4 + 0.4 * exp(-shortest_path(i, j)) + Normal(0, 0.05)
+  trust_ij = clamp(trust_ij, 0.05, 0.95)
+  ```
+  - 直接邻居（d=1）：trust ≈ 0.65 ± 0.05
+  - 二跳邻居（d=2）：trust ≈ 0.45 ± 0.05
+  - 更远节点不在 neighbors 中（WS 图的自然结果）
+  - 为什么不全部 0.5：距离衰减让 WS 图的聚类社区自带 trust 梯度，初始就有"圈子感"
 - Exchange 成功 → trust 小幅提升
 - Coerce 成功（对方视角）→ trust 大幅下降
 - 信息/事件只在 trust > threshold 的直接邻居间传播
@@ -643,6 +659,71 @@ loot_amount = min(
 # 当 EV_produce > EV_coerce 时，社会自然转入生产主导
 # 不需要手动切换"模式"
 ```
+
+### 5.5.3 迁移机制（双层：制度迁移 + 网络迁移）
+
+Agent 迁移包含两个独立但关联的层面：
+
+**① 制度迁移（Organization 归属变更）— v0.1 实现**
+
+由 §5.5.2 的 EV_join / EV_outside 决策驱动。Agent 在 wake_up 时周期性评估当前 org 的 EV，低于阈值则退出：
+
+```
+on wake_up(agent):
+    if agent.org_id is not None:
+        if EV_outside(agent) - EV_join(agent, current_org) > EXIT_THRESHOLD:
+            leave_org(agent)                    # 退出当前 org
+            agent.wealth *= (1 - exit_penalty)  # 支付退出罚金
+            trigger network_rewire(agent)       # 触发网络迁移
+
+    # 无组织 Agent 扫描邻居所在 org
+    if agent.org_id is None:
+        for neighbor_org in neighbor_orgs(agent):
+            if EV_join(agent, neighbor_org) - EV_outside(agent) > JOIN_THRESHOLD:
+                if avg_trust(agent, neighbor_org.members) > entry_barrier:
+                    join_org(agent, neighbor_org)
+                    break
+```
+
+**② 网络迁移（topology rewiring）— v0.1 实现**
+
+制度迁移改变 org 归属，但如果 Agent 的邻居网络不变，迁移名存实亡（仍跟旧 org 成员高 trust 交易）。因此退出 org 时自动触发 network rewiring：
+
+```python
+def network_rewire(agent, REWIRE_RATIO=0.3):
+    # 随机替换一部分旧邻居为新邻居
+    old_neighbors = list(agent.neighbors.keys())
+    n_rewire = int(len(old_neighbors) * REWIRE_RATIO)
+    to_remove = random.sample(old_neighbors, n_rewire)
+
+    for neighbor_id in to_remove:
+        # 旧连接 trust 衰减（不立即删除，允许恢复）
+        agent.neighbors[neighbor_id] *= REWIRE_DECAY  # 默认 0.3
+        # 新连接：从二跳邻居中随机选取
+        new_neighbor = random_2hop_neighbor(agent, exclude=old_neighbors)
+        if new_neighbor is not None:
+            agent.neighbors[new_neighbor] = INITIAL_REWIRE_TRUST  # 默认 0.3
+```
+
+**两层迁移的协同效果：**
+
+| 场景 | 制度迁移 | 网络迁移 | 涌现结果 |
+|------|----------|----------|----------|
+| 不满 org → 退出 | ✅ 退出 org | ✅ 弱化旧连接 + 建立新连接 | Agent 真正"搬家"，融入新社区 |
+| 不满 org → 留下 | ❌ 未退出 | ❌ 不触发 | 忍耐 / 等待制度突变 |
+| 无 org → 加入 | ✅ 加入 org | 部分触发（新建连接） | 新成员逐步融入 |
+| org 解散 | ✅ 所有人退出 | ✅ 全员 rewire | 社区碎片化 → 重新聚合 |
+
+**migration_rate 度量（用于制度突变触发条件 §5.6）：**
+
+```python
+migration_rate = (n_exits_recent + n_joins_recent) / org_size / time_window
+```
+
+**遗留问题（v0.2+）：**
+- 跨区域迁移：当前 rewiring 限于二跳范围，无法模拟长距离迁移（如大航海时代殖民）。v0.2 可引入 `long_range_migration_prob` 允许连接到任意 Agent
+- 群体迁移：当前只有个体迁移，v0.2 可支持 org 子群集体迁移（如部落分裂/合并）
+- 迁移成本：v0.1 仅有 exit_penalty，v0.2 可引入距离/文化差异成本
 
 ### 5.6 制度压力触发突变
 
@@ -993,7 +1074,7 @@ v0.1 目标 50–200 Agent，但架构设计必须保证可扩展至 500+：
 |------|------|
 | EventQueue | O(log N) 优先队列，禁止 O(N) 全扫描 |
 | NetworkGraph | 稀疏图，平均度 < 20，禁止全连接 |
-| OrgEngine | 局部子图检测，不遍历全体 Agent |
+| OrgEngine | 增量式局部检测（见下方说明），禁止每事件全图遍历 |
 | AgentEngine | 无全局锁，事件局部化 |
 
 关键数据结构：
@@ -1005,6 +1086,30 @@ NetworkGraph      → 稀疏邻接表
 OrganizationIndex → dict[id, Organization]
 ResourceLedger    → 因果守恒账本（事件来源合法性审计）
 ```
+
+**OrgEngine 扫描策略说明（review 4.1 澄清）：**
+
+§2 原则"禁止全局扫描"的精确边界：
+
+| 允许 | 禁止 |
+|------|------|
+| 事件触发的局部邻域扫描（BFS ≤ 2 跳） | 每个 event 都全图遍历 |
+| 低频定期全图 org 检测（每 N 个事件执行一次，N ≥ 100） | 高频全图扫描（每个 event 都检测） |
+| trust 变更时增量更新邻域密度 | 实时维护全局密度矩阵 |
+
+v0.1 实现策略：**增量式 org 检测**
+
+```python
+# 不是每次 event 都全图遍历，而是：
+# 1. 每次 trust 变更时，更新变更边所在局部的密度缓存
+# 2. 当密度缓存越过阈值 → schedule org_check event
+# 3. org_check event 只遍历该局部连通分量（通常 < 30 节点）
+# 4. 作为兜底，每 ORG_SCAN_INTERVAL 个事件执行一次全图检测（N=500 时 ≈ O(500+E) ≈ O(5500)，可接受）
+
+ORG_SCAN_INTERVAL = 200  # 每处理 200 个事件做一次全图兜底扫描
+```
+
+这样日常 O(1)~O(30)，兜底扫描频率低且复杂度可控。
 
 ---
 
@@ -1018,6 +1123,25 @@ ResourceLedger    → 因果守恒账本（事件来源合法性审计）
 - [ ] **组织涌现**：至少自动生成一个 Organization（非手动创建）
 - [ ] **强制有代价**：Coerce 行为不是永远最优策略，存在反制
 - [ ] **局部价格差异**：不同网络区域的交换比率出现分化
+
+**"局部价格差异"度量方法（review 2.2 补充）：**
+
+当前模型没有显式"价格"字段，但 Exchange 撮合过程中 `offer_price` / `counter_offer` 就是隐式价格。度量方式：
+
+```python
+# 1. 每次 exchange_settle 时记录成交价到 agent 的 exchange_history
+#    成交价 = actual_transfer / counter_transfer（wealth 比率）
+
+# 2. "区域"定义：以 Organization 为区域单位
+#    无 org 的 Agent 按网络连通分量聚类（复用 OrgEngine 的连通分量检测）
+
+# 3. 区域间价格差异指标：
+#    avg_price[region_i] = mean(recent_settle_prices in region_i)
+#    price_variance = var([avg_price[r] for r in all_regions])
+#    验收通过条件：price_variance > PRICE_DIVERGENCE_THRESHOLD（默认 0.05）
+
+# 4. 输出到 metrics.py，与 Gini 系数并列
+```
 
 若无上述现象，优先检查：参数阈值是否过松/过紧，而非修改机制。
 
